@@ -1,90 +1,65 @@
 let
-    // ===== CONFIGURATION - UPDATE THESE VALUES =====
-    Organisation = "YourOrganisation",
-    Project = "YourProject",
+    // ===== READ CONFIGURATION FROM EXCEL =====
+    ConfigTable = Excel.CurrentWorkbook(){[Name="ConfigTable"]}[Content],
+    GetConfig = (param) => Table.SelectRows(ConfigTable, each [Parameter] = param){0}[Value],
     
-    // Specify your AreaLevel2 values (add or remove as needed)
-    AreaLevel2List = {"Programme1", "Programme2", "Programme3"},
+    Organisation = GetConfig("Organisation"),
+    Project = GetConfig("Project"),
     
-    // ===== BUILD ODATA URL =====
-    BaseUrl = "https://analytics.dev.azure.com/" & Organisation & "/" & Project & "/_odata/v2.0/WorkItems?",
+    // ===== READ AREA FILTERS FROM EXCEL =====
+    AreaFilterTable = Excel.CurrentWorkbook(){[Name="AreaFilterTable"]}[Content],
+    AreaNames = Table.Column(AreaFilterTable, "AreaName"),
     
-    // Build AreaLevel2 filter dynamically
+    // ===== BUILD DYNAMIC AREA FILTER =====
+    AreaPathList = List.Transform(AreaNames, each Project & "\" & _),
     AreaFilters = Text.Combine(
-        List.Transform(AreaLevel2List, each "Area/AreaLevel2 eq '" & _ & "'"),
+        List.Transform(AreaPathList, each "startswith(Area/AreaPath, '" & _ & "')"),
         " or "
     ),
     
-    // Filter: Features only, not removed, matching AreaLevel2 values
+    // ===== BUILD ODATA URL =====
+    BaseUrl = "https://analytics.dev.azure.com/" & Organisation & "/" & Project & "/_odata/v2.0/WorkItems?",
     Filter = "$filter=WorkItemType eq 'Feature' and State ne 'Removed' and (" & AreaFilters & ")",
-    
-    // Select: Core fields and custom fields (using your exact field names)
-    Select = "$select=" & 
-        "WorkItemId," &
-        "Title," &
-        "State," &
-        "Priority," &
-        "ChangedDate," &
-        "TargetDate," &
-        "Custom_OriginalStartDate," &
-        "Custom_OriginalEndDate," &
-        "Custom_EndDate," &
-        "Custom_KeyFeature," &
-        "Custom_CriticalDate," &
-        "Custom_RAGStatus," &
-        "ParentWorkItemId",
-    
-    // Expand: Get AssignedTo details and Area details
-    Expand = "$expand=AssignedTo($select=UserName),Area($select=AreaLevel2)",
-    
-    // Order by target date
+    Expand = "$expand=AssignedTo($select=UserName),Area($select=AreaPath)",
     OrderBy = "$orderby=TargetDate asc",
-    
-    // Combine URL
-    FullUrl = BaseUrl & Filter & "&" & Select & "&" & Expand & "&" & OrderBy,
+    FullUrl = BaseUrl & Filter & "&" & Expand & "&" & OrderBy,
     
     // ===== EXECUTE QUERY =====
     Source = OData.Feed(FullUrl),
     
     // ===== TRANSFORM DATA =====
-    // Expand AssignedTo to get Assignee name
     #"Expanded AssignedTo" = Table.ExpandRecordColumn(Source, "AssignedTo", {"UserName"}, {"Assignee"}),
+    #"Expanded Area" = Table.ExpandRecordColumn(#"Expanded AssignedTo", "Area", {"AreaPath"}, {"AreaPath"}),
     
-    // Expand Area to get Programme (AreaLevel2)
-    #"Expanded Area" = Table.ExpandRecordColumn(#"Expanded AssignedTo", "Area", {"AreaLevel2"}, {"Programme"}),
-    
-    // Rename columns for clarity
+    // Rename columns to friendly names
     #"Renamed Columns" = Table.RenameColumns(#"Expanded Area", {
         {"WorkItemId", "FeatureID"},
         {"State", "Status"},
         {"ChangedDate", "LastUpdated"},
-        {"TargetDate", "TargetStart"},
-        {"Custom_EndDate", "TargetEnd"},
+        {"StartDate", "ForecastActualStart"},
+        {"TargetDate", "ForecastEnd"},
         {"Custom_OriginalStartDate", "OriginalStartDate"},
         {"Custom_OriginalEndDate", "OriginalEndDate"},
         {"Custom_KeyFeature", "IsKeyFeature"},
         {"Custom_CriticalDate", "IsCriticalDate"},
-        {"Custom_RAGStatus", "RAGStatus"},
-        {"ParentWorkItemId", "ParentID"}
+        {"ParentWorkItemId", "EpicID"}
     }),
     
-    // Reorder columns
-    #"Reordered Columns" = Table.ReorderColumns(#"Renamed Columns", {
+    // Select only the columns we need
+    #"Selected Columns" = Table.SelectColumns(#"Renamed Columns", {
         "FeatureID",
         "Title",
         "Assignee",
-        "Programme",
+        "AreaPath",
         "Status",
-        "Priority",
-        "RAGStatus",
         "LastUpdated",
         "OriginalStartDate",
         "OriginalEndDate",
-        "TargetStart",
-        "TargetEnd",
+        "ForecastActualStart",
+        "ForecastEnd",
         "IsKeyFeature",
         "IsCriticalDate",
-        "ParentID"
+        "EpicID"
     })
 in
-    #"Reordered Columns"
+    #"Selected Columns"
