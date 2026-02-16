@@ -1,0 +1,269 @@
+================================================================================
+MONTHLY MILESTONE REPORT — BUSINESS RULES & LOGIC
+================================================================================
+Resource Capacity Planner | Cloud & Platforms PMO
+Version: 1.0
+Date:    17 February 2026
+================================================================================
+
+
+1.  PURPOSE
+--------------------------------------------------------------------------------
+
+The Monthly Milestone Report provides a single filtered view of all project
+milestones for a given reporting period. It is designed for use in monthly
+resourcing meetings and quarterly reporting, answering three questions:
+
+    •  What was completed this month?
+    •  What is scheduled (in-flight or upcoming) this month?
+    •  What should have been scheduled but has been delayed?
+
+Milestones are sourced from Azure DevOps Features via Power Query and enriched
+with calculated columns in the _MilestoneData table.
+
+
+2.  FILTERS
+--------------------------------------------------------------------------------
+
+Three filters control the report. Each filter supports an "All" option that
+disables that filter axis. Filters combine using AND logic — a milestone must
+satisfy all active filters to appear.
+
+    Filter      Format              Examples
+    ----------  ------------------  --------------------------------
+    Year        Australian FY       FY25, FY26, FY27, All
+    Month       Three-letter abbr.  Jan, Feb, Mar … Dec, All
+    Project     Project name text   "Network Refresh", All
+
+Australian Financial Year Convention:
+    FY26 runs from 1 July 2025 to 30 June 2026.
+    Months July through December fall in the first calendar year (FY - 1).
+    Months January through June fall in the second calendar year (FY itself).
+
+    Example:  FY26 + Sep  →  September 2025
+              FY26 + Feb  →  February 2026
+
+When Year is "All" and a specific Month is selected, the report shows that
+month across all available years (e.g. every January on record).
+
+When Month is "All" and a specific Year is selected, the report shows the
+full financial year (July to June).
+
+
+3.  MILESTONE CATEGORIES
+--------------------------------------------------------------------------------
+
+Every milestone is classified into exactly one of three categories based on
+a strict evaluation order. Once a milestone matches a category, it is excluded
+from subsequent checks. This guarantees no duplicates.
+
+Evaluation order:  Complete  →  Scheduled  →  Delayed
+
+Milestones that do not match any category are excluded from the report.
+
+
+3.1  COMPLETE
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Definition:
+    The milestone has a ClosedDate in Azure DevOps, and that ClosedDate falls
+    within the selected reporting period.
+
+How it works:
+    •  DevOps populates the ClosedDate field automatically when a work item
+       transitions to a state mapped to the "Completed" state category.
+    •  The report checks whether the ClosedDate's month and financial year
+       match the selected filter values.
+    •  If Year is "All", the FY check is skipped.
+    •  If Month is "All", the month check is skipped.
+
+A milestone is Complete even if its planned dates also overlap the period.
+Completion takes precedence over all other categories.
+
+
+3.2  SCHEDULED
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Definition:
+    The milestone is NOT complete in the reporting period, AND its effective
+    date range overlaps with the reporting period.
+
+Date fallback logic:
+    The system uses "effective dates" with a two-tier fallback:
+
+    1.  First preference:  PlannedStartDate and TargetEndDate
+        (these are the current working dates maintained in DevOps)
+
+    2.  Fallback:          OriginalStartDate_PMP and OriginalEndDate_PMP
+        (the baseline dates from the Project Management Plan)
+
+    Start and end dates are resolved independently — e.g. PlannedStartDate
+    may be available while TargetEndDate is missing, in which case the system
+    uses PlannedStartDate for the start and falls back to OriginalEndDate_PMP
+    for the end.
+
+    If neither tier provides a usable date for both start and end, the
+    milestone cannot be classified as Scheduled and falls through to the
+    Delayed check.
+
+Overlap test:
+    A milestone overlaps the reporting period when BOTH of these are true:
+
+        Effective Start Date  <=  Last day of the reporting period
+        Effective End Date    >=  First day of the reporting period
+
+    This standard range-overlap test correctly captures milestones that:
+        •  Start before and end during the period
+        •  Start and end entirely within the period
+        •  Start during and end after the period
+        •  Span the entire period
+
+
+3.3  DELAYED
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Definition:
+    The milestone is NOT complete and NOT scheduled in the reporting period,
+    BUT its original PMP baseline dates indicate it SHOULD have been active
+    during this period, AND its planned start has been pushed beyond the
+    period (or no planned start exists at all).
+
+In plain terms:
+    "According to the original plan, this milestone should be happening now.
+    But it hasn't been scheduled yet, or it's been pushed out."
+
+Conditions (all must be true):
+    1.  Not already classified as Complete or Scheduled.
+    2.  OriginalStartDate_PMP and OriginalEndDate_PMP both exist.
+    3.  The original PMP date range overlaps the reporting period
+        (same overlap test as Scheduled).
+    4.  EITHER:
+            a.  PlannedStartDate exists but is AFTER the reporting period end
+                (milestone has been explicitly pushed out), OR
+            b.  PlannedStartDate does not exist
+                (milestone has never been scheduled).
+
+What this catches:
+    •  Milestones where the PM has pushed the start date into a future month.
+    •  Milestones that were baselined but never had working dates assigned.
+
+What this does NOT catch:
+    •  Milestones that started on time but are overrunning (these appear as
+       Scheduled because their effective dates still overlap the period).
+    •  Overrunning milestones are better identified via the IsOverdue
+       calculated column (TargetEndDate < TODAY and Status <> Complete) which
+       is handled separately by conditional formatting on the Milestones sheet.
+
+
+4.  SORT ORDER
+--------------------------------------------------------------------------------
+
+Results are sorted in two tiers:
+
+    Primary sort:   Category order — Complete first, then Scheduled, then Delayed
+    Secondary sort: Date ascending within each category
+
+The date used for secondary sorting depends on the category:
+
+    Category      Sort Date
+    ----------    -------------------------------------------
+    Complete      ClosedDate (when it was finished)
+    Scheduled     Effective End Date (when it's due)
+    Delayed       Original End Date PMP (when it was due)
+
+If no usable sort date exists, the milestone sorts to the bottom of its
+category group.
+
+
+5.  EDGE CASES & DEFENSIVE HANDLING
+--------------------------------------------------------------------------------
+
+5.1  Missing dates
+    •  If ClosedDate is blank, the milestone cannot be Complete.
+    •  If all four date fields (Planned Start, Target End, Original Start PMP,
+       Original End PMP) are blank, the milestone is excluded from the report
+       entirely.
+    •  If planned dates are blank but PMP originals exist, the milestone can
+       still qualify as Scheduled (via fallback) or Delayed.
+
+5.2  Invalid date values
+    •  All date columns are validated using ISNUMBER() before comparison.
+       Text values, errors, or blank cells are treated as "no date available"
+       and trigger the fallback cascade.
+
+5.3  No matches
+    •  If no milestones match the combined filters, the report displays
+       "No milestones match filters" rather than an error.
+
+5.4  A milestone closed and reopened
+    •  DevOps updates ClosedDate to reflect the most recent closure. If a
+       milestone is reopened, ClosedDate is cleared and the milestone reverts
+       to Scheduled or Delayed based on its dates.
+
+5.5  Year = "All" with a specific month
+    •  The year filter is disabled entirely. The report shows the selected
+       month across all available financial years. This is the safest
+       interpretation — the alternative (guessing a year) risks hiding data.
+
+
+6.  OUTPUT COLUMNS
+--------------------------------------------------------------------------------
+
+The report prepends a Category column to the standard _MilestoneData fields:
+
+    Column              Description
+    ------------------  -----------------------------------------------
+    Category            "Complete", "Scheduled", or "Delayed"
+    MilestoneID         DevOps Work Item ID
+    Title               Milestone name
+    Project             Parent Epic / Project name
+    PM                  Assigned Project Manager
+    AreaPath            Programme / workstream hierarchy
+    PlannedStartDate    Current working start date
+    TargetEndDate       Current working end date
+    OriginalStartDate   PMP baseline start
+    OriginalEndDate     PMP baseline end
+    ClosedDate          Date the milestone was marked done in DevOps
+    Status              DevOps state (New, Active, Resolved, Closed)
+    KeyMilestone        Y/N flag
+    DevOpsLink          Hyperlink to the work item in DevOps
+
+Additional columns from _MilestoneData flow through unchanged.
+
+
+7.  CONDITIONAL FORMATTING
+--------------------------------------------------------------------------------
+
+The Category column drives row-level formatting:
+
+    Category      Fill Colour     Text Colour     Meaning
+    ----------    -------------   -------------   -------------------------
+    Complete      Light green     Dark green      Done — no action needed
+    Scheduled     No fill         Standard        In-flight or upcoming
+    Delayed       Light red       Dark red        Behind plan — needs action
+
+
+8.  RELATIONSHIP TO OTHER VIEWS
+--------------------------------------------------------------------------------
+
+This report complements (does not replace) the existing Milestones sheet
+filters. The key differences:
+
+    Milestones Sheet            Monthly Report
+    -------------------------   ---------------------------------
+    Filters by individual       Filters by reporting period
+    field values (PM, Area,     (FY + Month) with category logic
+    Status, Month, Quarter)
+
+    Shows current state of      Shows what happened / should have
+    all milestones              happened in a specific month
+
+    Sort by Target End Date     Sort by Category then Date
+
+    Used for day-to-day         Used for monthly resourcing
+    milestone tracking          meetings and quarterly reporting
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================
